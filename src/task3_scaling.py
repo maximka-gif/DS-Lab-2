@@ -62,6 +62,24 @@ class ScalingAnalyzer:
         self.target_col = target_col
         self.scaled_datasets = {}
         self.scalers = {}
+
+    def _get_feature_columns(self) -> List[str]:
+        numeric_cols = list(self.data.select_dtypes(include=[np.number]).columns)
+        if self.target_col and self.target_col in numeric_cols:
+            numeric_cols = [col for col in numeric_cols if col != self.target_col]
+        return numeric_cols
+
+    def _apply_scaler(self, scaler, key: str) -> pd.DataFrame:
+        scaled_df = self.data.copy()
+        feature_cols = self._get_feature_columns()
+
+        if len(feature_cols) > 0 and len(scaled_df) > 0:
+            scaled_values = scaler.fit_transform(scaled_df[feature_cols])
+            scaled_df[feature_cols] = scaled_values
+
+        self.scalers[key] = scaler
+        self.scaled_datasets[key] = scaled_df
+        return scaled_df
         
     def apply_minmax_scaling(self, feature_range: Tuple[float, float] = (0, 1)) -> pd.DataFrame:
         """
@@ -73,7 +91,8 @@ class ScalingAnalyzer:
         Returns:
             pd.DataFrame: DataFrame with features scaled to specified range.
         """
-        pass
+        scaler = MinMaxScaler(feature_range=feature_range)
+        return self._apply_scaler(scaler, 'minmax')
     
     def apply_standard_scaling(self) -> pd.DataFrame:
         """
@@ -82,7 +101,8 @@ class ScalingAnalyzer:
         Returns:
             pd.DataFrame: DataFrame with standardized features.
         """
-        pass
+        scaler = StandardScaler()
+        return self._apply_scaler(scaler, 'standard')
     
     def apply_robust_scaling(self) -> pd.DataFrame:
         """
@@ -91,7 +111,8 @@ class ScalingAnalyzer:
         Returns:
             pd.DataFrame: DataFrame with robust scaled features.
         """
-        pass
+        scaler = RobustScaler()
+        return self._apply_scaler(scaler, 'robust')
     
     def apply_maxabs_scaling(self) -> pd.DataFrame:
         """
@@ -100,7 +121,8 @@ class ScalingAnalyzer:
         Returns:
             pd.DataFrame: DataFrame with maxabs scaled features.
         """
-        pass
+        scaler = MaxAbsScaler()
+        return self._apply_scaler(scaler, 'maxabs')
     
     def apply_power_transform(self, method: str = 'yeo-johnson') -> pd.DataFrame:
         """
@@ -112,7 +134,8 @@ class ScalingAnalyzer:
         Returns:
             pd.DataFrame: DataFrame with power transformed and standardized features.
         """
-        pass
+        scaler = PowerTransformer(method=method)
+        return self._apply_scaler(scaler, 'power')
     
     def get_scaling_summary(self) -> pd.DataFrame:
         """
@@ -121,7 +144,16 @@ class ScalingAnalyzer:
         Returns:
             DataFrame with statistics for each scaling method
         """
-        pass
+        feature_cols = self._get_feature_columns()
+        cols_to_describe = feature_cols if feature_cols else list(self.original_data.columns)
+
+        summary = {
+            'original': self.original_data[cols_to_describe].describe().loc[['mean', 'std', 'min', 'max']]
+        }
+        for method_name, scaled_df in self.scaled_datasets.items():
+            summary[method_name] = scaled_df[cols_to_describe].describe().loc[['mean', 'std', 'min', 'max']]
+
+        return pd.concat(summary, axis=1)
     
     def evaluate_model_performance(self, model_type: str = 'linear_regression',
                                    dataset_name: str = 'original') -> Dict[str, float]:
@@ -135,7 +167,42 @@ class ScalingAnalyzer:
         Returns:
             Dict[str, float]: Dictionary containing cv_score and cv_std.
         """
-        pass
+        if dataset_name == 'original':
+            df = self.original_data.copy()
+        elif dataset_name in self.scaled_datasets:
+            df = self.scaled_datasets[dataset_name].copy()
+        else:
+            raise ValueError(f"Dataset '{dataset_name}' not found")
+
+        if not self.target_col or self.target_col not in df.columns:
+            raise ValueError("Target column not specified or not found in dataset")
+
+        numeric_df = df.select_dtypes(include=[np.number]).dropna()
+        X = numeric_df.drop(columns=[self.target_col])
+        y = numeric_df[self.target_col]
+
+        if model_type == 'linear_regression':
+            model = LinearRegression()
+            scoring = 'r2'
+        elif model_type == 'knn':
+            model = KNeighborsClassifier(n_neighbors=min(5, max(1, len(X) // 2)))
+            scoring = 'accuracy'
+        elif model_type == 'svm':
+            model = SVC(random_state=42)
+            scoring = 'accuracy'
+        elif model_type == 'neural_network':
+            model = MLPClassifier(max_iter=300, random_state=42)
+            scoring = 'accuracy'
+        else:
+            raise ValueError(f"Unknown model type: '{model_type}'")
+
+        cv_folds = min(5, len(X))
+        scores = cross_val_score(model, X, y, cv=cv_folds, scoring=scoring)
+
+        return {
+            'cv_score': float(np.mean(scores)),
+            'cv_std': float(np.std(scores)),
+        }
     
     def compare_model_performance(self, model_types: List[str] = None) -> pd.DataFrame:
         """
@@ -171,7 +238,7 @@ class ScalingAnalyzer:
         
         Parameters:
             figsize (Tuple[int, int], optional): Figure size in inches. Defaults to (15, 10).
-        
+            
         Returns:
             matplotlib.figure.Figure: The generated figure object.
         """
@@ -191,7 +258,7 @@ class ScalingAnalyzer:
         n_rows = (n_methods + n_cols - 1) // n_cols
         
         fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
-        axes = axes.flatten() if n_methods > 1 else [axes]
+        axes = np.atleast_1d(axes).flatten()
         
         # Original data
         ax = axes[0]
@@ -255,7 +322,7 @@ class ScalingAnalyzer:
                 data_to_plot.append(scaled_df[feature].dropna())
                 labels.append(method_name.upper())
             
-            bp = ax.boxplot(data_to_plot, labels=labels, patch_artist=True)
+            bp = ax.boxplot(data_to_plot, tick_labels=labels, patch_artist=True)
             
             # Color the boxes
             colors = ['skyblue'] + ['lightcoral'] * len(self.scaled_datasets)
@@ -295,7 +362,7 @@ class ScalingAnalyzer:
         n_rows = (n_methods + n_cols - 1) // n_cols
         
         fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
-        axes = axes.flatten() if n_methods > 1 else [axes]
+        axes = np.atleast_1d(axes).flatten()
         
         # Original correlation
         ax = axes[0]
